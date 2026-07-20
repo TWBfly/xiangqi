@@ -31,7 +31,7 @@
 在 `RecognitionTests` 中加入：
 
 ```python
-def test_trusted_occupancy_keeps_piece_when_empty_template_wins(self):
+def test_trusted_occupancy_rejects_piece_when_identity_is_unclear(self):
     image, rect = standard_board_image()
     calibration = Calibration.create(image, rect)
     points = grid_points(rect)
@@ -44,8 +44,8 @@ def test_trusted_occupancy_keeps_piece_when_empty_template_wins(self):
 
     result = calibration.recognize(image)
 
-    self.assertTrue(result.valid, result.error)
-    self.assertEqual(result.board[row][col], "b")
+    self.assertFalse(result.valid)
+    self.assertIn("检测到棋子但无法确认身份", result.error)
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -53,7 +53,7 @@ def test_trusted_occupancy_keeps_piece_when_empty_template_wins(self):
 Run:
 
 ```bash
-python3 -m unittest -v test_assistant.RecognitionTests.test_trusted_occupancy_keeps_piece_when_empty_template_wins
+python3 -m unittest -v test_assistant.RecognitionTests.test_trusted_occupancy_rejects_piece_when_identity_is_unclear
 ```
 
 Expected: FAIL，当前实现把 `(0, 2)` 识别为空，因为空模板分数高于黑象模板。
@@ -113,7 +113,7 @@ Run:
 
 ```bash
 python3 -m unittest -v \
-  test_assistant.RecognitionTests.test_trusted_occupancy_keeps_piece_when_empty_template_wins \
+  test_assistant.RecognitionTests.test_trusted_occupancy_rejects_piece_when_identity_is_unclear \
   test_assistant.RecognitionTests.test_full_recognition_ignores_small_cursor_circle_on_empty_point \
   test_assistant.RecognitionTests.test_piece_inventory_resolves_moved_cannon_visual_distractor \
   test_assistant.RecognitionTests.test_circle_board_still_rejects_missing_king
