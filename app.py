@@ -178,7 +178,7 @@ class AssistantApp:
         self.side_to_move_box.grid(row=2, column=1, sticky="w", padx=(8, 0))
         search_frame = ttk.Frame(frame)
         search_frame.grid(row=2, column=2, sticky="e")
-        ttk.Label(search_frame, text="搜索秒").pack(side="left")
+        ttk.Label(search_frame, text="最长秒").pack(side="left")
         ttk.Spinbox(
             search_frame, from_=1, to=60, textvariable=self.movetime_var, width=4
         ).pack(side="left", padx=(4, 0))
@@ -536,6 +536,10 @@ class AssistantApp:
 
     def stop(self):
         self.stop_event.set()
+        with self.engine_lock:
+            engine = self.engine
+        if engine:
+            engine.stop_search()
         self.start_button.configure(state="disabled")
         self.status_var.set("正在停止分析")
 

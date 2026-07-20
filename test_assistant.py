@@ -1163,6 +1163,21 @@ class LoopTests(unittest.TestCase):
 
         self.assertEqual(list(app.results.queue), [("stopped",)])
 
+    def test_stop_notifies_running_engine(self):
+        app = object.__new__(AssistantApp)
+        app.stop_event = threading.Event()
+        app.engine_lock = threading.Lock()
+        app.engine = Mock()
+        app.start_button = Mock()
+        app.status_var = Mock()
+
+        app.stop()
+
+        self.assertTrue(app.stop_event.is_set())
+        app.engine.stop_search.assert_called_once_with()
+        app.start_button.configure.assert_called_once_with(state="disabled")
+        app.status_var.set.assert_called_once_with("正在停止分析")
+
     def test_diagnostic_frames_overwrite_one_latest_pair(self):
         first = np.zeros((10, 10, 3), dtype=np.uint8)
         second = np.full((10, 10, 3), 255, dtype=np.uint8)
