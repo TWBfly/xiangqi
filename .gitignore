@@ -1,0 +1,33 @@
+# Debug scratch files
+scratch/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.env
+.venv
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# Pikafish binaries (large, platform-specific)
+pikafish
+pikafish.exe
+pikafish_bin
+*.nnue
+
+# Snapshots (user-specific)
+analysis_snapshot.png
+calibration*.json
