@@ -181,6 +181,23 @@ class RecognitionTests(unittest.TestCase):
         self.assertFalse(result.valid)
         self.assertIn("检测到棋子但无法确认身份", result.error)
 
+    def test_trusted_occupancy_rejects_unclassified_empty_circle(self):
+        image, rect = standard_board_image()
+        calibration = Calibration.create(image, rect)
+        occupied = {
+            (row, col)
+            for row, values in enumerate(STANDARD_BOARD)
+            for col, label in enumerate(values)
+            if label
+        }
+        occupied.add((4, 0))
+
+        with patch.object(calibration, "_occupied_cells", return_value=occupied):
+            result = calibration.recognize(image)
+
+        self.assertFalse(result.valid)
+        self.assertIn("检测到棋子数量异常", result.error)
+
     def test_piece_inventory_resolves_moved_cannon_visual_distractor(self):
         image, rect = standard_board_image()
         calibration = Calibration.create(image, rect)
@@ -1593,7 +1610,7 @@ class LoopTests(unittest.TestCase):
         app = self._manual_sync_app()
         app.capture = Mock(return_value=frame)
         app.calibration.recognize.return_value = br.Recognition(
-            tuple(), 0.0, False, "置信度过低"
+            tuple(), 0.0, False, "检测到棋子但无法确认身份: [(2, 4)]"
         )
 
         app.sync_current_board()
@@ -1602,7 +1619,7 @@ class LoopTests(unittest.TestCase):
         thread_class.assert_not_called()
         showerror.assert_called_once()
         app.status_var.set.assert_called_with(
-            "无法识别当前棋盘: 置信度过低。请等待动画结束后重试；"
+            "无法识别当前棋盘: 检测到棋子但无法确认身份: [(2, 4)]。请等待动画结束后重试；"
             "仅在分辨率、棋盘皮肤或执棋方向改变时重新校准"
         )
 
