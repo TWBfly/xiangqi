@@ -949,7 +949,7 @@ class EngineTests(unittest.TestCase):
         ):
             engine._read_until(lambda line: line == "uciok", 1.0)
 
-    def test_configure_strength_uses_all_cpu_and_large_hash(self):
+    def test_configure_strength_caps_threads_at_eight(self):
         engine = object.__new__(PikafishEngine)
         sent = []
         engine.send_command = sent.append
@@ -965,13 +965,13 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(
             sent,
             [
-                "setoption name Threads value 12",
+                "setoption name Threads value 8",
                 "setoption name Hash value 128",
                 "setoption name MultiPV value 1",
             ],
         )
 
-    def test_engine_uses_complete_position_history(self):
+    def test_engine_uses_adaptive_time_with_hard_limit(self):
         engine = object.__new__(PikafishEngine)
         engine._lock = threading.Lock()
         sent = []
@@ -981,8 +981,31 @@ class EngineTests(unittest.TestCase):
 
         engine.get_best_move(command, movetime=5000)
 
-        # Engine must receive the full command including moves history (not stripped)
-        self.assertEqual(sent, ["ucinewgame", "isready", command, "go movetime 5000"])
+        self.assertEqual(
+            sent,
+            [
+                "ucinewgame",
+                "isready",
+                command,
+                "go wtime 10000 btime 10000 movestogo 10 movetime 5000",
+            ],
+        )
+
+    def test_stop_search_sends_stop_only_to_running_process(self):
+        engine = object.__new__(PikafishEngine)
+        process = Mock()
+        process.poll.return_value = None
+        engine.process = process
+
+        engine.stop_search()
+
+        process.stdin.write.assert_called_once_with("stop\n")
+        process.stdin.flush.assert_called_once_with()
+
+        process.stdin.reset_mock()
+        process.poll.return_value = 0
+        engine.stop_search()
+        process.stdin.write.assert_not_called()
 
     def test_windows_engine_process_has_no_console(self):
         engine = object.__new__(PikafishEngine)

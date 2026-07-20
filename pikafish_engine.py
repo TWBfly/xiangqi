@@ -166,7 +166,11 @@ class PikafishEngine:
                 return fallback
 
         if "Threads" in option_lines:
-            threads = min(maximum("Threads", 1), max(1, os.cpu_count() or 1))
+            threads = min(
+                maximum("Threads", 1),
+                8,
+                max(1, os.cpu_count() or 1),
+            )
             self.send_command(f"setoption name Threads value {threads}")
         if "Hash" in option_lines:
             self.send_command(
@@ -191,6 +195,7 @@ class PikafishEngine:
                     break
 
     def get_best_move(self, position, movetime=5000):
+        movetime = int(movetime)
         position_command = (
             position if position.startswith("position fen ") else f"position fen {position}"
         )
@@ -201,7 +206,10 @@ class PikafishEngine:
             self._read_until(lambda line: line == "readyok", 5.0)
 
             self.send_command(position_command)
-            self.send_command(f"go movetime {int(movetime)}")
+            clock = movetime * 2
+            self.send_command(
+                f"go wtime {clock} btime {clock} movestogo 10 movetime {movetime}"
+            )
             lines = self._read_until(
                 lambda line: line.startswith("bestmove "),
                 max(5.0, movetime / 1000 + 3.0),
@@ -220,6 +228,16 @@ class PikafishEngine:
                 score = "Mate"
                 break
         return bestmove, score
+
+    def stop_search(self):
+        process = self.process
+        if not process or process.poll() is not None:
+            return
+        try:
+            process.stdin.write("stop\n")
+            process.stdin.flush()
+        except (BrokenPipeError, OSError):
+            pass
 
     def close(self):
         with self._lock:
