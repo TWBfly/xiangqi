@@ -1007,6 +1007,15 @@ class EngineTests(unittest.TestCase):
         engine.stop_search()
         process.stdin.write.assert_not_called()
 
+    def test_stop_search_ignores_stdin_closed_during_shutdown(self):
+        engine = object.__new__(PikafishEngine)
+        process = Mock()
+        process.poll.return_value = None
+        process.stdin.write.side_effect = ValueError("I/O operation on closed file")
+        engine.process = process
+
+        engine.stop_search()
+
     def test_windows_engine_process_has_no_console(self):
         engine = object.__new__(PikafishEngine)
         engine.binary_path = "pikafish.exe"

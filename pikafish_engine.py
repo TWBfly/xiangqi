@@ -236,7 +236,7 @@ class PikafishEngine:
         try:
             process.stdin.write("stop\n")
             process.stdin.flush()
-        except (BrokenPipeError, OSError):
+        except (BrokenPipeError, OSError, ValueError):
             pass
 
     def close(self):
