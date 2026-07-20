@@ -1,272 +1,232 @@
-# Highlighted Piece Recognition Safety Implementation Plan
+# 高亮棋子识别安全修复实施计划
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Prevent a visually present highlighted piece from becoming an empty square and causing Pikafish to recommend a move that is impossible on the real board.
+**Goal:** 防止可信圆占用证据对应的高亮棋子被模板分类静默识别为空，从而向 Pikafish 发送缺子局面并显示不可执行着法。
 
-**Architecture:** Keep the existing OpenCV/template recognizer, but make trusted Hough occupancy authoritative over the empty template. Recover a non-empty identity only when its score reaches the existing calibration threshold, then fail closed if any detected occupied square is empty after inventory and position corrections. Keep the existing `best_advice()` legal-move check as the independent engine-output guard.
+**Architecture:** 在现有 `Calibration.recognize()` 内分离占用与身份：可信圆命中的格只允许非空身份竞争；库存和位置修正后检查占用不变量，无法恢复时返回无效识别。保留 `best_advice()` 的真实棋规检查作为第二道防线，不修改 Pikafish。
 
-**Tech Stack:** Python 3.10+, OpenCV 4.8.1.78, NumPy 1.26.1, `unittest`, Pikafish UCI.
+**Tech Stack:** Python 3.10+、OpenCV 4.8.1.78、NumPy 1.26.1、标准库 `unittest`、本地 Pikafish UCI。
 
 ## Global Constraints
 
-- Work only on branch `dev-1.0`.
-- Do not modify `/Users/tang/PycharmProjects/pythonProject/xiangqi/pikafish`.
-- Do not add dependencies, OCR, neural networks, databases, or a multi-frame voting framework.
-- If a detected piece identity cannot be confirmed, reject analysis instead of displaying a guessed move.
-- Preserve rotated-board behavior and the existing strong-template fallback for Hough misses.
-- Preserve the user's untracked `3.png`.
+- 所有生产改动只写入外层仓库 `dev-1.0` 分支。
+- `/xiangqi/pikafish` 是独立仓库，只读，不修改。
+- 无法可靠确认棋子身份时必须拒绝分析，不得猜测后调用引擎。
+- 不新增依赖、不引入多帧投票或新的识别状态机。
+- 保留未跟踪用户文件 `3.png`，不加入提交。
 
----
-
-### Task 1: Make trusted occupancy authoritative
+### Task 1: 建立高亮棋子漏识别的失败测试
 
 **Files:**
-- Modify: `test_assistant.py:676-739`
-- Modify: `board_recognition.py:509-618`
+- Modify: `/Users/tang/PycharmProjects/pythonProject/xiangqi/test_assistant.py`（`RecognitionTests`）
+- Test: 同上
 
 **Interfaces:**
-- Consumes: `Calibration.recognize(image) -> Recognition`, `Calibration._occupied_cells(image, rect, size) -> set[tuple[int, int]]`, existing `self.threshold`.
-- Produces: the same `Recognition` interface; an invalid result uses the error prefix `检测到棋子但无法确认身份:`.
+- Consumes: 现有 `standard_board_image()`、`Calibration.create()`、`grid_points()`。
+- Produces: 一个可重复证明“占用格不能被空标签覆盖”的单元测试。
 
-- [ ] **Step 1: Write the failing occupied-piece recovery test**
+- [ ] **Step 1: Write the failing test**
 
-Add to `RecognitionTests`:
-
-```python
-    def test_circle_occupancy_keeps_piece_when_empty_template_wins(self):
-        image, rect = standard_board_image()
-        calibration = Calibration.create(image, rect)
-        elephant = calibration.samples[calibration.labels == "b"][0].copy()
-        calibration.samples[calibration.labels == ""] = elephant
-        calibration.samples[calibration.labels == "b"] *= 0.8
-        occupied = {
-            (row, col)
-            for row, values in enumerate(STANDARD_BOARD)
-            for col, label in enumerate(values)
-            if label
-        }
-
-        with patch.object(calibration, "_occupied_cells", return_value=occupied):
-            result = calibration.recognize(image)
-
-        self.assertTrue(result.valid, result.error)
-        self.assertEqual(result.board, STANDARD_BOARD)
-```
-
-- [ ] **Step 2: Write the failing uncertain-identity safety test**
+在 `RecognitionTests` 中加入：
 
 ```python
-    def test_circle_occupancy_rejects_uncertain_piece_identity(self):
-        image, rect = standard_board_image()
-        calibration = Calibration.create(image, rect)
-        elephant = calibration.samples[calibration.labels == "b"][0].copy()
-        calibration.samples[calibration.labels == ""] = elephant
-        calibration.samples[calibration.labels == "b"] *= 0.2
-        occupied = {
-            (row, col)
-            for row, values in enumerate(STANDARD_BOARD)
-            for col, label in enumerate(values)
-            if label
-        }
+def test_trusted_occupancy_keeps_piece_when_empty_template_wins(self):
+    image, rect = standard_board_image()
+    calibration = Calibration.create(image, rect)
+    points = grid_points(rect)
+    row, col = 0, 2  # 标准开局黑象，可信圆占用格
+    piece_vector = calibration._vector(
+        image, points[row][col], calibration.size
+    )
+    calibration.samples[calibration.labels == ""] = piece_vector
+    calibration.samples[calibration.labels == "b"] *= 0.8
 
-        with patch.object(calibration, "_occupied_cells", return_value=occupied):
-            result = calibration.recognize(image)
+    result = calibration.recognize(image)
 
-        self.assertFalse(result.valid)
-        self.assertIn("检测到棋子但无法确认身份", result.error)
+    self.assertTrue(result.valid, result.error)
+    self.assertEqual(result.board[row][col], "b")
 ```
 
-- [ ] **Step 3: Run both tests and verify RED**
+- [ ] **Step 2: Run test to verify it fails**
+
+Run:
 
 ```bash
-python3 -m unittest -v \
-  test_assistant.RecognitionTests.test_circle_occupancy_keeps_piece_when_empty_template_wins \
-  test_assistant.RecognitionTests.test_circle_occupancy_rejects_uncertain_piece_identity
+python3 -m unittest -v test_assistant.RecognitionTests.test_trusted_occupancy_keeps_piece_when_empty_template_wins
 ```
 
-Expected: first test fails because both black elephants become empty; second fails because that recognition is incorrectly marked valid.
+Expected: FAIL，当前实现把 `(0, 2)` 识别为空，因为空模板分数高于黑象模板。
 
-- [ ] **Step 4: Replace occupancy filtering with explicit recovery**
+### Task 2: 让可信占用证据优先于空模板
 
-In `Calibration.recognize()`, replace the current occupancy list comprehension with:
+**Files:**
+- Modify: `/Users/tang/PycharmProjects/pythonProject/xiangqi/board_recognition.py:413-618`
+- Test: `/Users/tang/PycharmProjects/pythonProject/xiangqi/test_assistant.py`
+
+**Interfaces:**
+- Consumes: Task 1 的失败测试；现有 `cell_scores`、`occupied`、`occupancy_trusted`、库存上限逻辑。
+- Produces: `Calibration.recognize(image) -> Recognition`；可信圆命中的格不再静默变空。
+
+- [ ] **Step 1: Write the minimal implementation**
+
+在计算 `occupied` 和 `occupancy_trusted` 后，重建 `assigned` 时使用以下规则：可信占用格从非空标签中取最高分；未占用格保留现有强模板兜底：
 
 ```python
-        uncertain = []
-        if occupancy_trusted:
-            filtered = []
-            strong_score = max(
-                0.55,
-                1.0001
-                if self.threshold + 0.10 >= 1.0
-                else self.threshold + 0.10,
-            )
-            for cell, label in enumerate(assigned):
-                position = divmod(cell, 9)
-                if position in occupied and not label:
-                    nonempty = [candidate for candidate in labels if candidate]
-                    label = max(nonempty, key=cell_scores[cell].get)
-                    if cell_scores[cell][label] < self.threshold:
-                        uncertain.append(position)
-                elif (
-                    position not in occupied
-                    and (not label or cell_scores[cell][label] < strong_score)
-                ):
-                    label = ""
-                filtered.append(label)
-            assigned = filtered
+assigned = []
+for cell, values in enumerate(cell_scores):
+    row, col = divmod(cell, 9)
+    if occupancy_trusted and (row, col) in occupied:
+        nonempty = {label: score for label, score in values.items() if label}
+        label = max(nonempty, key=nonempty.get) if nonempty else ""
+    else:
+        label = max(values, key=values.get)
+    assigned.append(label)
 ```
 
-Do not add a classifier, state machine, or configuration option.
-
-- [ ] **Step 5: Add the post-correction occupancy invariant**
-
-After restricted-piece correction has produced the final `board`, add:
+保留现有库存调整，但在库存调整、仕相清理之后加入占用不变量；若不满足则返回无效识别：
 
 ```python
-        missing = (
-            occupied
-            - {
-                (row, col)
-                for row, values in enumerate(board)
-                for col, label in enumerate(values)
-                if label
-            }
-            if occupancy_trusted
-            else set()
+if occupancy_trusted:
+    missing = sorted(
+        occupied
+        - {
+            divmod(cell, 9)
+            for cell, label in enumerate(assigned)
+            if label
+        }
+    )
+    if missing:
+        return Recognition(
+            board,
+            confidence,
+            False,
+            f"检测到棋子但无法确认身份: {missing}",
         )
-        unresolved = sorted(set(uncertain) | missing)
 ```
 
-Replace the current `error` choice with:
+把已有测试 `test_circle_board_uses_structure_when_absolute_scores_are_low` 保留为结构识别兼容性测试；Task 1 只要求占用格不能因空模板丢失，不改变未占用格的强模板兜底。
 
-```python
-        if unresolved:
-            squares = ", ".join(
-                f"{chr(97 + col)}{9 - row}" for row, col in unresolved
-            )
-            error = f"检测到棋子但无法确认身份: {squares}"
-        else:
-            error = (
-                validate_board(board)
-                if occupancy_trusted
-                else self._validate(board, confidence)
-            )
-```
+- [ ] **Step 2: Run focused tests**
 
-- [ ] **Step 6: Run focused recognition tests and verify GREEN**
+Run:
 
 ```bash
 python3 -m unittest -v \
-  test_assistant.RecognitionTests.test_circle_occupancy_keeps_piece_when_empty_template_wins \
-  test_assistant.RecognitionTests.test_circle_occupancy_rejects_uncertain_piece_identity \
+  test_assistant.RecognitionTests.test_trusted_occupancy_keeps_piece_when_empty_template_wins \
   test_assistant.RecognitionTests.test_full_recognition_ignores_small_cursor_circle_on_empty_point \
-  test_assistant.RecognitionTests.test_full_recognition_never_assigns_piece_without_large_circle \
-  test_assistant.RecognitionTests.test_piece_inventory_resolves_moved_cannon_visual_distractor
+  test_assistant.RecognitionTests.test_piece_inventory_resolves_moved_cannon_visual_distractor \
+  test_assistant.RecognitionTests.test_circle_board_still_rejects_missing_king
 ```
 
-Expected: all five tests pass.
+Expected: all PASS。
 
-- [ ] **Step 7: Commit the recognition fix**
+- [ ] **Step 3: Commit**
 
 ```bash
 git add board_recognition.py test_assistant.py
-git commit -m "fix: preserve highlighted pieces during recognition"
+git commit -m "fix: preserve trusted occupied pieces"
 ```
 
----
-
-### Task 2: Lock the reported cannon move behind the legal-move guard
+### Task 3: 固化现场炮路安全回归
 
 **Files:**
-- Modify: `test_assistant.py:1060-1090`
+- Modify: `/Users/tang/PycharmProjects/pythonProject/xiangqi/test_assistant.py`（`EngineTests` 或 `LoopTests`）
 
 **Interfaces:**
-- Consumes: `AssistantApp.best_advice(board, position, side, movetime)`, `board_to_fen()`, and the existing `detect_move()` guard.
-- Produces: a regression proving `h7c7` cannot be displayed when both real blockers exist.
+- Consumes: `AssistantApp.best_advice()`、`detect_move()`、固定现场 FEN。
+- Produces: 现场真实盘面不会接受 `h7c7`，漏掉 `e7` 的错误盘面可被测试明确区分。
 
-- [ ] **Step 1: Add the exact reported-position regression test**
+- [ ] **Step 1: Add the characterization test**
+
+加入固定盘面测试。该测试覆盖已有的第二道防线，不修改生产代码；它必须在任何识别器修复前保持通过：
 
 ```python
-    def test_best_advice_rejects_reported_cannon_move_with_two_screens(self):
-        board, _side = br.fen_to_board(
-            "1rbaka2r/9/c1n1b1cCn/p1p1p3p/9/2P3p2/"
-            "P3P3P/2N1C4/4N4/R1BAKAB1R w - - 0 1"
-        )
-        app = object.__new__(AssistantApp)
-        app.engine_lock = threading.Lock()
-        app.engine = Mock()
-        app.best_move = Mock(return_value=("h7c7", "+3.88"))
+def test_best_advice_rejects_cannon_jump_over_two_screens(self):
+    fen = (
+        "1rbaka2r/9/c1n1b1cCn/p1p1p3p/9/2P3p2/"
+        "P3P3P/2N1C4/4N4/R1BAKAB1R w - - 0 1"
+    )
+    app = object.__new__(AssistantApp)
+    app.stop_event = threading.Event()
+    app.closing = False
+    app.engine_lock = threading.Lock()
+    app.engine = None
+    app.best_move = Mock(return_value=("h7c7", "+3.88"))
+    board, _ = br.fen_to_board(fen)
 
-        with self.assertRaisesRegex(RuntimeError, "h7c7"):
-            app.best_advice(
-                board,
-                f"position fen {board_to_fen(board, 'w')}",
-                "w",
-                1000,
-            )
-
-        self.assertEqual(app.best_move.call_count, 2)
+    with self.assertRaisesRegex(RuntimeError, "非法着法"):
+        app.best_advice(board, f"position fen {fen}", "w", 1000)
 ```
 
-- [ ] **Step 2: Run the exact regression**
+- [ ] **Step 2: Run the characterization test**
+
+Run:
+
+```bash
+python3 -m unittest -v test_assistant.LoopTests.test_best_advice_rejects_cannon_jump_over_two_screens
+```
+
+Expected: PASS；若失败，先停止执行并修复测试夹具或重新审查 `best_advice()`，不得绕过该防线继续修改识别器。
+
+- [ ] **Step 3: Keep implementation unchanged**
+
+不为已存在的合法性防线增加重复代码。只在 Task 2 的识别结果安全不变量上修复。
+
+- [ ] **Step 4: Run focused regression**
 
 ```bash
 python3 -m unittest -v \
-  test_assistant.EngineTests.test_best_advice_rejects_reported_cannon_move_with_two_screens
+  test_assistant.LoopTests.test_best_advice_rejects_cannon_jump_over_two_screens \
+  test_assistant.EngineTests.test_best_advice_restarts_after_illegal_elephant_move
 ```
 
-Expected: PASS without production changes. It records that the second guard works when recognition supplies the true board; Task 1 fixes the upstream data loss.
+Expected: all PASS。
 
-- [ ] **Step 3: Commit the现场 regression**
-
-```bash
-git add test_assistant.py
-git commit -m "test: cover reported illegal cannon advice"
-```
-
----
-
-### Task 3: Verify the full pipeline
+### Task 4: 全量验证与 Windows 交付检查
 
 **Files:**
-- Verify only: `board_recognition.py`, `app.py`, `pikafish_engine.py`, `game_state.py`, `test_assistant.py`
-- Preserve: `3.png`
+- Modify: 无新增生产文件；如测试文案需要同步，只修改 `test_assistant.py`。
 
 **Interfaces:**
-- Consumes: all recognition and engine interfaces after Tasks 1–2.
-- Produces: fresh evidence that the fix is syntactically valid, regression-safe, and does not mutate the nested engine repository.
+- Consumes: Tasks 1–3 的提交。
+- Produces: 可复核的测试、编译、格式和真实引擎证据。
 
-- [ ] **Step 1: Run the full automated suite**
+- [ ] **Step 1: Run the complete test suite**
 
 ```bash
 python3 -m unittest discover -v
 ```
 
-Expected: all tests pass; the existing Tencent screenshot test may remain skipped when its sample is absent.
+Expected: 0 failures；腾讯截图样本缺失导致的既有 skip 可以保留。
 
-- [ ] **Step 2: Compile Python modules**
+- [ ] **Step 2: Run static checks**
 
 ```bash
 python3 -m py_compile app.py capture.py board_recognition.py pikafish_engine.py game_state.py
-```
-
-Expected: exit code 0 and no output.
-
-- [ ] **Step 3: Re-run the现场 engine contrast**
-
-```bash
-python3 -c 'from pikafish_engine import PikafishEngine; positions={"真实盘面":"1rbaka2r/9/c1n1b1cCn/p1p1p3p/9/2P3p2/P3P3P/2N1C4/4N4/R1BAKAB1R w - - 0 1","漏掉e7黑象":"1rbaka2r/9/c1n3cCn/p1p1p3p/9/2P3p2/P3P3P/2N1C4/4N4/R1BAKAB1R w - - 0 1"}; e=PikafishEngine(); [(print(name,e.get_best_move(fen,5000))) for name,fen in positions.items()]; e.close()'
-```
-
-Expected: the漏象局面 reproduces `h7c7` near `+3.88`; the true board does not return `h7c7`.
-
-- [ ] **Step 4: Check repository hygiene**
-
-```bash
 git diff --check
+```
+
+Expected: 两条命令退出码均为 0。
+
+- [ ] **Step 3: Run real-engine position comparison**
+
+用真实盘面 FEN 和删除 `e7` 的错误 FEN 分别调用本地 Pikafish；记录真实盘面不得返回 `h7c7`，错误 FEN 可以返回 `h7c7`，证明引擎行为与识别层根因一致。
+
+- [ ] **Step 4: Check repository boundaries**
+
+```bash
 git status --short --branch
 git -C pikafish status --short --branch
 ```
 
-Expected: outer repository contains only intentional commits plus preserved untracked `3.png`; nested Pikafish remains clean on `master`.
+Expected：外层仅保留用户未跟踪 `3.png`（若仍存在）和本次已提交内容；嵌套 `pikafish` 仓库无修改。
+
+- [ ] **Step 5: Commit any documentation-only test wording changes**
+
+```bash
+git add test_assistant.py
+git commit -m "test: cover cannon path recognition safety"
+```
+
+仅在 Task 3 实际新增了测试时执行；若已有测试覆盖现场防线，不创建空提交。
