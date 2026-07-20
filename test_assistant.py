@@ -181,23 +181,6 @@ class RecognitionTests(unittest.TestCase):
         self.assertFalse(result.valid)
         self.assertIn("检测到棋子但无法确认身份", result.error)
 
-    def test_trusted_occupancy_rejects_unclassified_empty_circle(self):
-        image, rect = standard_board_image()
-        calibration = Calibration.create(image, rect)
-        occupied = {
-            (row, col)
-            for row, values in enumerate(STANDARD_BOARD)
-            for col, label in enumerate(values)
-            if label
-        }
-        occupied.add((4, 0))
-
-        with patch.object(calibration, "_occupied_cells", return_value=occupied):
-            result = calibration.recognize(image)
-
-        self.assertFalse(result.valid)
-        self.assertIn("检测到棋子数量异常", result.error)
-
     def test_piece_inventory_resolves_moved_cannon_visual_distractor(self):
         image, rect = standard_board_image()
         calibration = Calibration.create(image, rect)

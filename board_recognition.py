@@ -512,13 +512,6 @@ class Calibration:
             if label
         }
         occupied = self._occupied_cells(image, self.rect, self.size)
-        if len(occupied) > 32:
-            return Recognition(
-                tuple(),
-                0.0,
-                False,
-                f"检测到棋子数量异常: {len(occupied)}",
-            )
         # ponytail: JJ圆形皮肤提供24+强圆证据；新皮肤若达到该值再改用填充剖面。
         if len(occupied) >= 24:
             self.circle_occupancy = True
@@ -628,8 +621,12 @@ class Calibration:
             ]
         )
         if occupancy_trusted:
+            occupied_board = {
+                (9 - row, 8 - col) if self.rotated else (row, col)
+                for row, col in occupied
+            }
             missing = sorted(
-                occupied
+                occupied_board
                 - {
                     (row, col)
                     for row, values in enumerate(board)

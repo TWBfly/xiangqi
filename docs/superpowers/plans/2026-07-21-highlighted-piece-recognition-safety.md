@@ -88,11 +88,16 @@ for cell, values in enumerate(cell_scores):
 
 ```python
 if occupancy_trusted:
+    occupied_board = {
+        (9 - row, 8 - col) if self.rotated else (row, col)
+        for row, col in occupied
+    }
     missing = sorted(
-        occupied
+        occupied_board
         - {
-            divmod(cell, 9)
-            for cell, label in enumerate(assigned)
+            (row, col)
+            for row, values in enumerate(board)
+            for col, label in enumerate(values)
             if label
         }
     )
