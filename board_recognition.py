@@ -512,13 +512,23 @@ class Calibration:
             if label
         }
         occupied = self._occupied_cells(image, self.rect, self.size)
-        assigned = [max(values, key=values.get) for values in cell_scores]
         # ponytail: JJ圆形皮肤提供24+强圆证据；新皮肤若达到该值再改用填充剖面。
         if len(occupied) >= 24:
             self.circle_occupancy = True
         occupancy_trusted = bool(
             self.circle_occupancy and 2 <= len(occupied) <= 32
         )
+        assigned = []
+        for cell, values in enumerate(cell_scores):
+            row, col = divmod(cell, 9)
+            if occupancy_trusted and (row, col) in occupied:
+                nonempty = {
+                    label: score for label, score in values.items() if label
+                }
+                label = max(nonempty, key=nonempty.get) if nonempty else ""
+            else:
+                label = max(values, key=values.get)
+            assigned.append(label)
         if occupancy_trusted:
             # ponytail: If a piece matches its templates very strongly, keep it even if
             # HoughCircles misses it due to selection rings or move highlights.
@@ -610,6 +620,22 @@ class Calibration:
                 if label
             ]
         )
+        if occupancy_trusted:
+            missing = sorted(
+                occupied
+                - {
+                    divmod(cell, 9)
+                    for cell, label in enumerate(assigned)
+                    if label
+                }
+            )
+            if missing:
+                return Recognition(
+                    board,
+                    confidence,
+                    False,
+                    f"检测到棋子但无法确认身份: {missing}",
+                )
         error = (
             validate_board(board)
             if occupancy_trusted

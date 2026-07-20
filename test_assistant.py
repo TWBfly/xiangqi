@@ -158,6 +158,29 @@ class BoardTests(unittest.TestCase):
 
 
 class RecognitionTests(unittest.TestCase):
+    def test_trusted_occupancy_rejects_piece_when_identity_is_unclear(self):
+        image, rect = standard_board_image()
+        calibration = Calibration.create(image, rect)
+        points = grid_points(rect)
+        row, col = 0, 2
+        piece_vector = calibration._vector(
+            image, points[row][col], calibration.size
+        )
+        calibration.samples[np.flatnonzero(calibration.labels == "")[0]] = piece_vector
+        calibration.samples[calibration.labels == "b"] *= 0.8
+        occupied = {
+            (r, c)
+            for r, values in enumerate(STANDARD_BOARD)
+            for c, label in enumerate(values)
+            if label and (r, c) != (0, 6)
+        }
+
+        with patch.object(calibration, "_occupied_cells", return_value=occupied):
+            result = calibration.recognize(image)
+
+        self.assertFalse(result.valid)
+        self.assertIn("检测到棋子但无法确认身份", result.error)
+
     def test_piece_inventory_resolves_moved_cannon_visual_distractor(self):
         image, rect = standard_board_image()
         calibration = Calibration.create(image, rect)
@@ -1086,6 +1109,22 @@ class EngineTests(unittest.TestCase):
 
         self.assertEqual(result, ("h2e2", "+0.20", "炮二平五"))
         self.assertEqual(app.best_move.call_count, 2)
+
+    def test_best_advice_rejects_cannon_jump_over_two_screens(self):
+        fen = (
+            "1rbaka2r/9/c1n1b1cCn/p1p1p3p/9/2P3p2/"
+            "P3P3P/2N1C4/4N4/R1BAKAB1R w - - 0 1"
+        )
+        app = object.__new__(AssistantApp)
+        app.stop_event = threading.Event()
+        app.closing = False
+        app.engine_lock = threading.Lock()
+        app.engine = None
+        app.best_move = Mock(return_value=("h7c7", "+3.88"))
+        board, _ = br.fen_to_board(fen)
+
+        with self.assertRaisesRegex(RuntimeError, "非法着法"):
+            app.best_advice(board, f"position fen {fen}", "w", 1000)
 
     @unittest.skipIf(os.name == "nt", "临时POSIX可执行脚本测试")
     def test_startup_timeout_reaps_process(self):
