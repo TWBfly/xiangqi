@@ -18,6 +18,8 @@ from board_recognition import (
     detect_board_rect,
     detect_move,
     infer_player_from_colors,
+    grid_points,
+    is_legal_xiangqi_move,
 )
 from capture import (
     adb_devices,
@@ -31,9 +33,24 @@ from pikafish_engine import PikafishEngine
 from game_state import GameState
 
 
-DEFAULT_SEARCH_SECONDS = 10
+DEFAULT_SEARCH_SECONDS = 20
 POLL_INTERVAL_SECONDS = 0.2
-APP_VERSION = "2026.07.20.5"
+APP_VERSION = "2026.07.23.2"
+
+
+def format_analysis_result(move, score, text):
+    status_suffix = ""
+    try:
+        val_str = str(score).split()[0]
+        val = float(val_str)
+        if val <= -4.0:
+            status_suffix = " (大劣局面/黑胜势)"
+        elif val >= 4.0:
+            status_suffix = " (大优局面)"
+    except (ValueError, IndexError):
+        if "Mate" in str(score):
+            status_suffix = " (将被绝杀/死棋)" if "-" in str(score) else " (绝杀)"
+    return text, f"{move} · {score}{status_suffix}"
 
 
 def save_diagnostic_frames(directory, reference, current):
@@ -116,8 +133,8 @@ class AssistantApp:
     def __init__(self, root):
         self.root = root
         self.root.title(f"象棋辅助 {APP_VERSION}")
-        self.root.geometry("360x330")
-        self.root.resizable(False, False)
+        self.root.geometry("360x700")
+        self.root.resizable(False, True)
         self.root.attributes("-topmost", True)
         self.root.protocol("WM_DELETE_WINDOW", self.close)
 
@@ -140,7 +157,13 @@ class AssistantApp:
         self.side_to_move_var = tk.StringVar(value="红方")
         self.movetime_var = tk.StringVar(value=str(DEFAULT_SEARCH_SECONDS))
         self.move_var = tk.StringVar(value="--")
-        self.status_var = tk.StringVar(value="请选择模拟器并校准")
+        self.source_var = tk.StringVar()
+        self.player_var = tk.StringVar(value="红方")
+        self.side_to_move_var = tk.StringVar(value="红方")
+        self.movetime_var = tk.StringVar(value=str(DEFAULT_SEARCH_SECONDS))
+        self.move_var = tk.StringVar(value="--")
+        self.status_var = tk.StringVar(value="AI已就绪，选择采集源即可同步分析")
+        self.preview_photo = None
 
         frame = ttk.Frame(root, padding=12)
         frame.pack(fill="both", expand=True)
@@ -179,11 +202,15 @@ class AssistantApp:
         search_frame = ttk.Frame(frame)
         search_frame.grid(row=2, column=2, sticky="e")
         ttk.Label(search_frame, text="最长秒").pack(side="left")
+        ttk.Label(search_frame, text="").pack(side="left")  # Spacer
         ttk.Spinbox(
             search_frame, from_=1, to=60, textvariable=self.movetime_var, width=4
         ).pack(side="left", padx=(4, 0))
 
-        ttk.Button(frame, text="校准棋盘", command=self.calibrate).grid(
+        self.sync_button = ttk.Button(
+            frame, text="一键同步分析", command=self.sync_current_board
+        )
+        self.sync_button.grid(
             row=3, column=0, columnspan=2, sticky="ew", pady=(8, 4)
         )
         self.start_button = ttk.Button(
@@ -191,10 +218,7 @@ class AssistantApp:
         )
         self.start_button.grid(row=3, column=2, sticky="ew", padx=(8, 0), pady=(8, 4))
 
-        self.sync_button = ttk.Button(
-            frame, text="同步并分析", command=self.sync_current_board
-        )
-        self.sync_button.grid(
+        ttk.Button(frame, text="重新校准/定位", command=self.calibrate).grid(
             row=4, column=0, columnspan=2, sticky="ew", pady=(0, 4)
         )
         ttk.Button(
@@ -204,18 +228,21 @@ class AssistantApp:
         ttk.Label(frame, textvariable=self.move_var, anchor="center", font=("Microsoft YaHei", 28, "bold")).grid(
             row=5, column=0, columnspan=3, sticky="ew", pady=4
         )
-        ttk.Label(frame, textvariable=self.status_var, anchor="center").grid(
-            row=6, column=0, columnspan=3, sticky="ew"
-        )
+        self.status_label = ttk.Label(frame, textvariable=self.status_var, anchor="center", wraplength=480, justify="center", cursor="hand2")
+        self.status_label.grid(row=6, column=0, columnspan=3, sticky="ew")
+        self.status_label.bind("<Button-1>", lambda e: messagebox.showinfo("状态/错误详情", self.status_var.get()))
+        self.preview_label = ttk.Label(frame, anchor="center")
+        self.preview_label.grid(row=7, column=0, columnspan=3, pady=(6, 0))
         frame.columnconfigure(1, weight=1)
         frame.columnconfigure(2, weight=1)
 
         try:
             self.calibration = Calibration.load(self.config_dir)
+            self.calibration.align_grid = True
             player_text = "黑方" if self.calibration.rotated else "红方"
             self.player_var.set(player_text)
             self.side_to_move_var.set(player_text)
-            self.status_var.set("已加载校准，请选择模拟器")
+            self.status_var.set("AI已就绪，选择采集源即可同步分析")
         except (OSError, ValueError, KeyError):
             pass
         self.refresh_sources()
@@ -288,6 +315,7 @@ class AssistantApp:
                 detected_player = "b" if calibration.rotated else "w"
             calibration.save(self.config_dir)
             self.calibration = calibration
+            self.calibration.align_grid = True
             self.move_var.set("--")
             player_text = "红方" if detected_player == "w" else "黑方"
             suffix = "" if automatic_player else "（使用人工选择）"
@@ -429,28 +457,42 @@ class AssistantApp:
                 raise ValueError("请选择可用模拟器")
             movetime = parse_movetime_seconds(self.movetime_var.get())
             self.status_var.set("正在截取当前棋盘")
-            # Try to capture and recognize with a retry loop to wait out animations
-            max_retries = 5
-            recognized = None
-            frame = None
+            # Try to capture and recognize with a multi-frame best-confidence loop to wait out animations
+            max_retries = 8
+            best_recognized = None
+            best_frame = None
+            best_conf = -1.0
+
             for attempt in range(max_retries):
                 frame = self.capture()
                 self.move_var.set("--")
                 self.status_var.set("正在识别当前棋盘")
                 recognized = self.calibration.recognize(frame)
+                
+                if recognized.confidence > best_conf:
+                    best_conf = recognized.confidence
+                    best_recognized = recognized
+                    best_frame = frame
+                    
                 if recognized.valid:
+                    best_recognized = recognized
+                    best_frame = frame
                     break
                 if attempt < max_retries - 1:
                     self.status_var.set(f"置信度低，等待动画结束中 ({attempt + 1}/{max_retries})...")
                     if hasattr(self, "root") and hasattr(self.root, "update"):
                         self.root.update()
                     import time
-                    time.sleep(0.15)
+                    time.sleep(0.18)
+
+            recognized = best_recognized
+            frame = best_frame
             if frame is not None:
                 save_analysis_snapshot(self.config_dir, frame)
-            if not recognized.valid:
+            if not recognized or not recognized.valid:
+                error_msg = recognized.error if recognized else "未截取到有效图像"
                 raise ValueError(
-                    f"无法识别当前棋盘: {recognized.error}。"
+                    f"无法识别当前棋盘: {error_msg}。"
                     "请等待动画结束后重试；"
                     "仅在分辨率、棋盘皮肤或执棋方向改变时重新校准"
                 )
@@ -557,7 +599,37 @@ class AssistantApp:
             )
             if self.stop_event.is_set():
                 return
-            self.results.put(("move", text, f"{move} · {score}"))
+            display_text, status_text = format_analysis_result(move, score, text)
+            self.results.put(("move", display_text, status_text))
+            
+            # Generate the board preview with padding so edge pieces are completely visible
+            img_path = self.config_dir / "analysis_snapshot.png"
+            if img_path.exists():
+                import cv2
+                frame = cv2.imread(str(img_path))
+                if frame is not None:
+                    left, top, right, bottom = self.calibration.rect
+                    cell_w = (right - left) / 8.0
+                    cell_h = (bottom - top) / 9.0
+                    pad = int(max(32, max(cell_w, cell_h) * 0.65))
+
+                    crop_left = max(0, left - pad)
+                    crop_top = max(0, top - pad)
+                    crop_right = min(frame.shape[1], right + pad)
+                    crop_bottom = min(frame.shape[0], bottom + pad)
+
+                    board_crop = frame[crop_top:crop_bottom, crop_left:crop_right].copy()
+                    coords = PikafishEngine.uci_to_coords(move)
+                    if coords:
+                        sc, sr, ec, er = coords
+                        if is_legal_xiangqi_move(board, sr, sc, er, ec, side):
+                            points = grid_points(self.calibration.rect, self.calibration.slant)
+                            x1 = points[sr][sc][0] - crop_left
+                            y1 = points[sr][sc][1] - crop_top
+                            x2 = points[er][ec][0] - crop_left
+                            y2 = points[er][ec][1] - crop_top
+                            cv2.arrowedLine(board_crop, (x1, y1), (x2, y2), (0, 0, 255), 4, tipLength=0.15)
+                    self.results.put(("board_preview", board_crop))
         except Exception as error:
             if not self.stop_event.is_set():
                 self.results.put(("error", str(error)))
@@ -623,14 +695,44 @@ class AssistantApp:
                         self.results.put(("status", "局面与当前回合不一致，正在恢复"))
 
                 if state.needs_analysis():
-                    move, score, text = self.best_advice(
-                        state.board,
-                        f"position fen {board_to_fen(state.board, state.side_to_move)}",
-                        state.side_to_move,
-                        movetime,
-                    )
-                    state.mark_analyzed()
-                    self.results.put(("move", text, f"{move} · {score}"))
+                    try:
+                        move, score, text = self.best_advice(
+                            state.board,
+                            state.position_command(),
+                            state.side_to_move,
+                            movetime,
+                        )
+                        state.mark_analyzed()
+                        display_text, status_text = format_analysis_result(move, score, text)
+                        self.results.put(("move", display_text, status_text))
+                        
+                        # Generate the board preview with padding so edge pieces are completely visible
+                        left, top, right, bottom = self.calibration.rect
+                        cell_w = (right - left) / 8.0
+                        cell_h = (bottom - top) / 9.0
+                        pad = int(max(32, max(cell_w, cell_h) * 0.65))
+
+                        crop_left = max(0, left - pad)
+                        crop_top = max(0, top - pad)
+                        crop_right = min(frame.shape[1], right + pad)
+                        crop_bottom = min(frame.shape[0], bottom + pad)
+
+                        board_crop = frame[crop_top:crop_bottom, crop_left:crop_right].copy()
+                        coords = PikafishEngine.uci_to_coords(move)
+                        if coords:
+                            sc, sr, ec, er = coords
+                            points = grid_points(self.calibration.rect, self.calibration.slant)
+                            x1 = points[sr][sc][0] - crop_left
+                            y1 = points[sr][sc][1] - crop_top
+                            x2 = points[er][ec][0] - crop_left
+                            y2 = points[er][ec][1] - crop_top
+                            cv2.arrowedLine(board_crop, (x1, y1), (x2, y2), (0, 0, 255), 4, tipLength=0.15)
+                        self.results.put(("board_preview", board_crop))
+                    except Exception as error:
+                        # ponytail: If an illegal move or analysis error occurs, log it and retry in the next iteration.
+                        self.results.put(("status", f"行棋或分析异常: {error}，正在重新计算"))
+                        self.results.put(("clear_move", f"行棋或分析异常: {error}，正在重新计算"))
+                        self.stop_event.wait(1.0)
                 elif result.error:
                     self.results.put(("status", result.error + diagnostic_error))
                 else:
@@ -654,10 +756,12 @@ class AssistantApp:
                 with self.engine_lock:
                     if self.stop_event.is_set() or self.closing:
                         raise RuntimeError("辅助已停止")
-                    if self.engine is None:
+                    if self.engine is None or not getattr(self.engine, "is_alive", lambda: True)():
                         self.engine = PikafishEngine()
                     engine = self.engine
                 return engine.get_best_move(position, movetime=movetime)
+            except ValueError:
+                raise
             except Exception as error:
                 last_error = error
                 if engine:
@@ -677,14 +781,15 @@ class AssistantApp:
             coords = PikafishEngine.uci_to_coords(move)
             if coords:
                 sc, sr, ec, er = coords
-                after = [list(row) for row in board]
-                after[er][ec] = after[sr][sc]
-                after[sr][sc] = ""
-                detected = detect_move(board, after)
-                if detected and detected.side == side:
-                    return move, score, PikafishEngine.get_chinese_move(
-                        move, board
-                    )
+                if is_legal_xiangqi_move(board, sr, sc, er, ec, side):
+                    after = [list(row) for row in board]
+                    after[er][ec] = after[sr][sc]
+                    after[sr][sc] = ""
+                    detected = detect_move(board, after)
+                    if detected and detected.side == side:
+                        return move, score, PikafishEngine.get_chinese_move(
+                            move, board
+                        )
             with self.engine_lock:
                 engine, self.engine = self.engine, None
             if engine:
@@ -698,11 +803,29 @@ class AssistantApp:
                 if event[0] == "move":
                     self.move_var.set(event[1])
                     self.status_var.set(event[2])
+                elif event[0] == "board_preview":
+                    try:
+                        import cv2
+                        from PIL import Image, ImageTk
+                        board_crop = event[1]
+                        h, w = board_crop.shape[:2]
+                        target_w = 240
+                        target_h = int(target_w * h / w)
+                        resized = cv2.resize(board_crop, (target_w, target_h))
+                        rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+                        pil_img = Image.fromarray(rgb)
+                        photo = ImageTk.PhotoImage(pil_img)
+                        self.preview_photo = photo
+                        self.preview_label.configure(image=photo)
+                    except Exception as err:
+                        self.status_var.set(f"渲染走法预览失败: {err}")
                 elif event[0] == "status":
                     self.status_var.set(event[1])
                 elif event[0] == "clear_move":
                     self.move_var.set("--")
                     self.status_var.set(event[1])
+                    self.preview_label.configure(image="")
+                    self.preview_photo = None
                 elif event[0] == "turn":
                     self.side_to_move_var.set(
                         "红方" if event[1] == "w" else "黑方"
@@ -710,6 +833,8 @@ class AssistantApp:
                 elif event[0] == "needs_sync":
                     self.pending_recovery_board = event[1]
                     self.move_var.set("--")
+                    self.preview_label.configure(image="")
+                    self.preview_photo = None
                     self.side_to_move_box.configure(state="readonly")
                     self.status_var.set(
                         "请选择“局面轮到”，然后点击“同步当前棋盘”"

@@ -31,3 +31,5 @@ pikafish_bin
 # Snapshots (user-specific)
 analysis_snapshot.png
 calibration*.json
+test_run.log
+diagnostic_*.png

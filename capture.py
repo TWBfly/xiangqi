@@ -83,9 +83,10 @@ def validate_frame(frame, expected_shape=None):
 
 
 def select_emulator_windows(windows):
-    game_names = ("jj象棋",)
+    # ponytail: Support 天天象棋, JJ象棋 and generic xiangqi window titles.
+    game_names = ("jj象棋", "天天象棋", "象棋", "中国象棋", "chess")
     tencent_names = ("腾讯手游助手", "gameloop")
-    emulator_names = ("雷电", "ldplayer") + tencent_names
+    emulator_names = ("雷电", "ldplayer", "mumu", "夜神", "nox", "逍遥", "memu", "bluestacks") + tencent_names
     matched = [
         window
         for window in windows

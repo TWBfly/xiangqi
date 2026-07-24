@@ -9,6 +9,8 @@ import time
 
 import shutil
 
+from board_recognition import fen_to_board
+
 
 def resource_path(relative_path):
     base_path = getattr(sys, "_MEIPASS", os.path.abspath(os.path.dirname(__file__)))
@@ -136,6 +138,11 @@ class PikafishEngine:
                 raise TimeoutError("等待Pikafish响应超时") from error
             if line is None:
                 code = self.process.poll() if self.process else None
+                if code is None and self.process:
+                    try:
+                        code = self.process.wait(timeout=0.2)
+                    except subprocess.TimeoutExpired:
+                        pass
                 if isinstance(code, int):
                     code_text = f"{code} / 0x{code & 0xFFFFFFFF:08X}"
                     # ponytail: Help diagnose common CPU AVX2 instruction compatibility crashes
@@ -174,7 +181,7 @@ class PikafishEngine:
             self.send_command(f"setoption name Threads value {threads}")
         if "Hash" in option_lines:
             self.send_command(
-                f"setoption name Hash value {min(maximum('Hash', 128), 128)}"
+                f"setoption name Hash value {min(maximum('Hash', 512), 512)}"
             )
         if "MultiPV" in option_lines:
             self.send_command("setoption name MultiPV value 1")
@@ -184,6 +191,9 @@ class PikafishEngine:
             raise RuntimeError("Pikafish未运行")
         self.process.stdin.write(command + "\n")
         self.process.stdin.flush()
+
+    def is_alive(self):
+        return bool(self.process and self.process.poll() is None)
 
     def _clear_queue(self):
         # ponytail: Clear leftover lines in the queue from previous search runs
@@ -199,34 +209,55 @@ class PikafishEngine:
         position_command = (
             position if position.startswith("position fen ") else f"position fen {position}"
         )
+        fen = position_command.removeprefix("position fen ").split(" moves ", 1)[0]
+        try:
+            fen_to_board(fen)
+        except ValueError as error:
+            raise ValueError(f"拒绝发送非法局面给Pikafish: {error}") from error
         with self._lock:
             self._clear_queue()
-            self.send_command("ucinewgame")
             self.send_command("isready")
             self._read_until(lambda line: line == "readyok", 5.0)
 
             self.send_command(position_command)
-            clock = movetime * 2
-            self.send_command(
-                f"go wtime {clock} btime {clock} movestogo 10 movetime {movetime}"
-            )
+            self.send_command(f"go movetime {movetime}")
             lines = self._read_until(
                 lambda line: line.startswith("bestmove "),
-                max(5.0, movetime / 1000 + 3.0),
+                max(5.0, movetime / 1000.0 + 5.0),
             )
         best_line = lines[-1].split()
         bestmove = best_line[1] if len(best_line) > 1 and best_line[1] != "(none)" else None
         score = "0.00"
+        depth = None
+        nps = None
+
         for line in reversed(lines):
-            if "score cp" in line:
+            parts = line.split()
+            if "depth" in parts and depth is None:
+                try:
+                    idx = parts.index("depth")
+                    depth = int(parts[idx + 1])
+                except (ValueError, IndexError):
+                    pass
+            if "nps" in parts and nps is None:
+                try:
+                    idx = parts.index("nps")
+                    nps = int(parts[idx + 1])
+                except (ValueError, IndexError):
+                    pass
+            if "score cp" in line and score == "0.00":
                 try:
                     score = f"{int(line.split('score cp', 1)[1].split()[0]) / 100:+.2f}"
                 except (ValueError, IndexError):
                     pass
-                break
-            if "score mate" in line:
-                score = "Mate"
-                break
+            elif "score mate" in line and score == "0.00":
+                mate_val = line.split("score mate", 1)[1].split()[0]
+                score = f"Mate {mate_val}"
+
+        if depth is not None:
+            nps_str = f" | {nps/1e6:.1f}M NPS" if nps and nps >= 1000000 else (f" | {nps/1e3:.0f}K NPS" if nps else "")
+            score = f"{score} (深度:{depth}层{nps_str})"
+
         return bestmove, score
 
     def stop_search(self):
@@ -283,6 +314,8 @@ class PikafishEngine:
         if not coords:
             return move
         sc, sr, ec, er = coords
+        if isinstance(board, tuple) and len(board) == 2 and isinstance(board[0], (tuple, list)):
+            board = board[0]
         piece = board[sr][sc]
         if not piece:
             return move
